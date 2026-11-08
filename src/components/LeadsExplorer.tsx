@@ -6,10 +6,11 @@ import { useAdmin } from "@/context/AdminContext";
 import { useData } from "@/context/DataContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useView } from "@/context/ViewContext";
-import { downloadCsv } from "@/lib/csv";
+import { downloadLeads } from "@/lib/export";
 import { EMPTY_FILTERS, activeFilterCount, applyFilters, buildOptions, type Filters, type SortOrder } from "@/lib/filters";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import type { Lead } from "@/lib/types";
+import ExportButton from "./ExportButton";
 import FilterDrawer from "./FilterDrawer";
 import FilterPanel from "./FilterPanel";
 import LeadCard from "./LeadCard";
@@ -131,26 +132,31 @@ export default function LeadsExplorer() {
         </label>
 
         <div className="flex w-full gap-2 sm:w-auto">
-          <button
-            type="button"
-            onClick={() => downloadCsv(results, view === "saved" ? "goodsales-lemmikud-filtreeritud" : "goodsales-muugivihjed")}
+          <ExportButton
+            label="Ekspordi tulemused"
+            icon={<Download className="h-4 w-4" aria-hidden />}
             disabled={results.length === 0}
-            className="btn-secondary flex-1 sm:flex-none"
-            title="Ekspordi praegused filtreeritud tulemused CSV-failina"
-          >
-            <Download className="h-4 w-4" aria-hidden />
-            Ekspordi tulemused
-          </button>
-          <button
-            type="button"
-            onClick={() => downloadCsv(savedForExport, "goodsales-lemmikud")}
+            title="Ekspordi praegused filtreeritud tulemused Exceli või CSV-failina"
+            className="flex-1 sm:flex-none"
+            align="left"
+            onExport={(format) =>
+              downloadLeads(
+                results,
+                view === "saved" ? "goodsales-lemmikud-filtreeritud" : "goodsales-muugivihjed",
+                format,
+                view === "saved" ? "Lemmikud" : "Müügivihjed",
+              )
+            }
+          />
+          <ExportButton
+            label="Ekspordi lemmikud"
+            icon={<Star className="h-4 w-4" aria-hidden />}
             disabled={favCount === 0}
-            className="btn-secondary flex-1 sm:flex-none"
-            title="Ekspordi kõik salvestatud müügivihjed CSV-failina"
-          >
-            <Star className="h-4 w-4" aria-hidden />
-            Ekspordi lemmikud
-          </button>
+            title="Ekspordi kõik salvestatud müügivihjed Exceli või CSV-failina"
+            className="flex-1 sm:flex-none"
+            align="right"
+            onExport={(format) => downloadLeads(savedForExport, "goodsales-lemmikud", format, "Lemmikud")}
+          />
         </div>
       </div>
 

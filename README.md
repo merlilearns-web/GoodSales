@@ -17,8 +17,12 @@ Ehitisregister (EHR) "Projekteerimistingimuste taotlus" exports. The UI is entir
   "All leads" / "Saved" view switcher.
 - **Lead cards:** status badge, favorite star, details grid, an "Ava EHR-is" link to the EHR document
   search, and a copy button for the EHR code.
-- **CSV export** of the filtered results or of all favorites (semicolon-separated UTF-8 with BOM, so it
-  opens correctly in Excel with Estonian locale settings).
+- **Export** of the filtered results or of all favorites, in two formats (`src/lib/export.ts`):
+  - **Excel (.xlsx)**, the default: bold blue header row, frozen header, filter buttons, column
+    widths, and real date cells. It opens correctly whatever the computer's regional settings.
+    The free SheetJS edition doesn't write styles, so `styleHeaderRow` patches the generated file.
+    The Excel writer is loaded only when someone exports.
+  - **CSV**: comma-separated UTF-8 with BOM (RFC 4180), for CRM or Google Sheets imports.
 - **Admin (`/haldus`)**, password protected: dataset metadata, upload a new `.xlsx` to replace the
   dataset for every visitor, restore the bundled default file, or clear the dataset. Other visitors
   pick up changes within 60 seconds, or immediately when they return to the tab.
