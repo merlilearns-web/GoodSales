@@ -64,4 +64,5 @@ See `.env.example`.
 ## Deployment
 
 Railway builds and deploys automatically from the `main` branch (`npm run build`, then `npm start`).
+The app always listens on port 3000 (`0.0.0.0`), so the Railway public domain's target port must be 3000.
 Run `npm run build` before every push.
