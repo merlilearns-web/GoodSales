@@ -18,6 +18,14 @@ body {
   color: #0f172a;
 }
 
+/* The search field has its own clear button; hide the browser's built-in one. */
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
 /* Minimum 44x44px touch target */
 @utility tap {
   @apply inline-flex min-h-11 min-w-11 items-center justify-center;
