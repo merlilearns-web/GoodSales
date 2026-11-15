@@ -110,7 +110,7 @@ export default function LeadsExplorer() {
   );
 
   const tabClass = (on: boolean) =>
-    `tap flex-1 gap-1.5 rounded-lg px-2 text-sm font-semibold transition-colors sm:flex-none sm:gap-2 sm:px-4 ${
+    `tap flex-1 gap-1.5 whitespace-nowrap rounded-lg px-2 text-sm font-semibold transition-colors sm:flex-none sm:gap-2 sm:px-4 ${
       on ? "bg-white text-brand shadow-sm" : "text-slate-600 hover:text-slate-900"
     }`;
 
@@ -151,7 +151,8 @@ export default function LeadsExplorer() {
             title="Sinu profiiliga sobivaimad müügivihjed"
           >
             <Sparkles className="h-4 w-4" aria-hidden />
-            AI soovitused
+            <span className="sm:hidden">AI</span>
+            <span className="hidden sm:inline">AI soovitused</span>
             {ai.highMatchCount > 0 && (
               <span className="rounded-full bg-emerald-600 px-1.5 text-xs text-white" title={`${ai.highMatchCount} vihjet sobivusega vähemalt ${HIGH_MATCH}%`}>
                 {ai.highMatchCount}
