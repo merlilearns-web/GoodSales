@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, useState } from "react";
-import { Calendar, Check, Copy, ExternalLink, FileText, Hash, Info, Landmark, MapPin, Star } from "lucide-react";
+import { ArrowRight, Calendar, Check, Copy, ExternalLink, FileText, Hash, Info, Landmark, MapPin, Sparkles, Star } from "lucide-react";
+import type { LeadScore } from "@/lib/ai/types";
 import { EHR_SEARCH_URL, formatDate, statusClass } from "@/lib/format";
 import type { Lead } from "@/lib/types";
 
@@ -9,6 +10,14 @@ interface Props {
   lead: Lead;
   favorite: boolean;
   onToggleFavorite: (lead: Lead) => void;
+  /** AI / local match score, when the lead has been analysed */
+  score?: LeadScore;
+}
+
+function matchClass(score: number): string {
+  if (score >= 75) return "bg-emerald-100 text-emerald-800 ring-emerald-300";
+  if (score >= 50) return "bg-amber-100 text-amber-800 ring-amber-300";
+  return "bg-slate-100 text-slate-600 ring-slate-300";
 }
 
 function Detail({ icon: Icon, label, children }: { icon: typeof Hash; label: string; children: React.ReactNode }) {
@@ -23,7 +32,7 @@ function Detail({ icon: Icon, label, children }: { icon: typeof Hash; label: str
   );
 }
 
-function LeadCard({ lead, favorite, onToggleFavorite }: Props) {
+function LeadCard({ lead, favorite, onToggleFavorite, score }: Props) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const longAddress = lead.address.length > 140;
@@ -44,6 +53,15 @@ function LeadCard({ lead, favorite, onToggleFavorite }: Props) {
       <div className="flex items-start gap-2 p-4 pb-3">
         <div className="min-w-0 flex-1">
           <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+            {score && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold ring-1 ring-inset ${matchClass(score.score)}`}
+                title="Sobivus sinu ettevõtte profiiliga"
+              >
+                <Sparkles className="h-3 w-3" aria-hidden />
+                Sobivus: {score.score}%
+              </span>
+            )}
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${statusClass(lead.status)}`} title="Seisund">
               {lead.status || "Teadmata"}
             </span>
@@ -68,6 +86,31 @@ function LeadCard({ lead, favorite, onToggleFavorite }: Props) {
           <Star className="h-6 w-6" fill={favorite ? "currentColor" : "none"} />
         </button>
       </div>
+
+      {/* AI explanation */}
+      {score && (
+        <div className="mx-4 mb-3 rounded-r-lg border-l-4 border-[#005AA3] bg-blue-50 px-3 py-2.5">
+          <p className="flex items-center justify-between gap-2 text-[11px] font-semibold uppercase tracking-wide text-brand">
+            <span className="flex items-center gap-1">
+              <Sparkles className="h-3.5 w-3.5" aria-hidden />
+              AI põhjendus
+            </span>
+            <span className="font-medium normal-case tracking-normal text-slate-500" title="Hinnangu allikas">
+              {score.source === "openai" ? "OpenAI" : "Lokaalne algoritm"}
+            </span>
+          </p>
+          <p className="mt-1 text-sm leading-snug text-slate-800">{score.reason}</p>
+          {score.suggestedAction && (
+            <p className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-600">
+              <span className="font-semibold">Soovitatav tegevus:</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand px-2 py-0.5 font-semibold text-white">
+                <ArrowRight className="h-3 w-3" aria-hidden />
+                {score.suggestedAction}
+              </span>
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Details */}
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-slate-100 px-4 py-3">

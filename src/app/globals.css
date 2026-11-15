@@ -26,6 +26,40 @@ input[type="search"]::-webkit-search-decoration {
   display: none;
 }
 
+/* Indeterminate progress bar for the AI analysis */
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+.progress-indeterminate {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--color-brand-50);
+}
+
+.progress-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: 9999px;
+  background: var(--color-brand);
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-indeterminate::after {
+    animation-duration: 3s;
+  }
+}
+
 /* Minimum 44x44px touch target */
 @utility tap {
   @apply inline-flex min-h-11 min-w-11 items-center justify-center;

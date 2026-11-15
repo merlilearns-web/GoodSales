@@ -1,11 +1,25 @@
 "use client";
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Download, Inbox, LayoutGrid, Loader2, SlidersHorizontal, Star, StarOff } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  Inbox,
+  LayoutGrid,
+  Loader2,
+  Pencil,
+  SlidersHorizontal,
+  Sparkles,
+  Star,
+  StarOff,
+  Trash2,
+} from "lucide-react";
 import { useAdmin } from "@/context/AdminContext";
+import { useAi } from "@/context/AiContext";
 import { useData } from "@/context/DataContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useView } from "@/context/ViewContext";
+import { HIGH_MATCH } from "@/lib/ai/types";
 import { downloadLeads } from "@/lib/export";
 import { EMPTY_FILTERS, activeFilterCount, applyFilters, buildOptions, type Filters, type SortOrder } from "@/lib/filters";
 import { formatDateTime, formatNumber } from "@/lib/format";
@@ -16,14 +30,17 @@ import FilterPanel from "./FilterPanel";
 import LeadCard from "./LeadCard";
 
 const PAGE_SIZE = 30;
+type AiSort = "score" | SortOrder;
 
 export default function LeadsExplorer() {
   const { leads, meta, status, error, refresh } = useData();
   const { favorites, count: favCount, isFavorite, toggle } = useFavorites();
   const { view, setView } = useView();
   const { isAdmin, openLogin } = useAdmin();
+  const ai = useAi();
 
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [aiSort, setAiSort] = useState<AiSort>("score");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const deferredFilters = useDeferredValue(filters);
@@ -34,14 +51,43 @@ export default function LeadsExplorer() {
     return Object.values(favorites).map((f) => byId.get(f.id) ?? f);
   }, [favorites, leads]);
 
-  const base = view === "saved" ? savedLeads : leads;
+  const scoredLeads = useMemo(() => leads.filter((l) => ai.scores[l.id]), [leads, ai.scores]);
+
+  const base = view === "saved" ? savedLeads : view === "ai" ? scoredLeads : leads;
   const options = useMemo(() => buildOptions(base), [base]);
-  const results = useMemo(() => applyFilters(base, deferredFilters), [base, deferredFilters]);
+  const results = useMemo(() => {
+    if (view !== "ai") return applyFilters(base, deferredFilters);
+    const list = applyFilters(base, { ...deferredFilters, sort: aiSort === "oldest" ? "oldest" : "newest" });
+    if (aiSort === "score") list.sort((a, b) => (ai.scores[b.id]?.score ?? 0) - (ai.scores[a.id]?.score ?? 0));
+    return list;
+  }, [base, deferredFilters, view, aiSort, ai.scores]);
   const visible = results.slice(0, limit);
   const active = activeFilterCount(filters);
   const stale = filters !== deferredFilters;
 
-  useEffect(() => setLimit(PAGE_SIZE), [deferredFilters, view]);
+  // The analysis looks at the whole dataset narrowed by the current filters.
+  const candidates = useMemo(() => applyFilters(leads, deferredFilters), [leads, deferredFilters]);
+  const profileReady = ai.profile.description.trim().length > 0 || ai.profile.categories.length > 0;
+
+  const runAnalysis = useCallback(async () => {
+    if (!profileReady) {
+      ai.openProfile("Enne analüüsi kirjelda, mida su ettevõte müüb, või vali eelistatud objektitüübid.");
+      return;
+    }
+    setView("ai");
+    setAiSort("score");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    await ai.analyze(candidates);
+  }, [ai, candidates, profileReady, setView]);
+
+  // "Salvesta ja analüüsi" in the profile panel.
+  useEffect(() => {
+    if (!ai.analyzeRequested || status === "loading") return;
+    ai.consumeAnalyzeRequest();
+    void runAnalysis();
+  }, [ai, status, runAnalysis]);
+
+  useEffect(() => setLimit(PAGE_SIZE), [deferredFilters, view, aiSort]);
 
   // Infinite scroll: load the next page when the sentinel scrolls into view.
   const sentinel = useRef<HTMLDivElement>(null);
@@ -64,32 +110,63 @@ export default function LeadsExplorer() {
   );
 
   const tabClass = (on: boolean) =>
-    `tap flex-1 gap-2 rounded-lg px-4 text-sm font-semibold transition-colors sm:flex-none ${
+    `tap flex-1 gap-1.5 rounded-lg px-2 text-sm font-semibold transition-colors sm:flex-none sm:gap-2 sm:px-4 ${
       on ? "bg-white text-brand shadow-sm" : "text-slate-600 hover:text-slate-900"
     }`;
+
+  const engineLabel =
+    ai.scoreState.engine === "openai" ? `OpenAI (${ai.scoreState.model ?? "gpt-4o-mini"})` : "lokaalne sobivusalgoritm";
+  const highInView = scoredLeads.filter((l) => (ai.scores[l.id]?.score ?? 0) >= HIGH_MATCH).length;
+
+  const analyzeButton = (extra = "") => (
+    <button type="button" onClick={() => void runAnalysis()} disabled={ai.running || leads.length === 0} className={`btn-primary ${extra}`}>
+      {ai.running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Sparkles className="h-4 w-4" aria-hidden />}
+      {ai.running ? "Analüüsin…" : "Analüüsi vihjeid minu profiili järgi"}
+    </button>
+  );
 
   return (
     <div className="mx-auto max-w-7xl px-4 pb-16 pt-4 sm:px-6 sm:pt-6">
       {/* Title + view switcher */}
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">
-            {view === "saved" ? "Salvestatud müügivihjed" : "Müügivihjed"}
+            {view === "saved" ? "Salvestatud müügivihjed" : view === "ai" ? "AI soovitused" : "Müügivihjed"}
           </h1>
           <p className="text-sm text-slate-500">
-            {meta && meta.recordCount > 0
-              ? `Projekteerimistingimuste taotlused Ehitisregistrist · ${formatNumber(meta.recordCount)} kirjet`
-              : "Projekteerimistingimuste taotlused Ehitisregistrist"}
+            {view === "ai"
+              ? "Sinu ettevõtte profiiliga kõige paremini sobivad müügivihjed"
+              : meta && meta.recordCount > 0
+                ? `Projekteerimistingimuste taotlused Ehitisregistrist · ${formatNumber(meta.recordCount)} kirjet`
+                : "Projekteerimistingimuste taotlused Ehitisregistrist"}
           </p>
         </div>
         <div className="flex rounded-xl bg-slate-200/70 p-1" role="tablist" aria-label="Vaade">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "ai"}
+            className={`${tabClass(view === "ai")} ${view === "ai" ? "" : "text-brand ring-1 ring-inset ring-brand/30"}`}
+            onClick={() => setView("ai")}
+            title="Sinu profiiliga sobivaimad müügivihjed"
+          >
+            <Sparkles className="h-4 w-4" aria-hidden />
+            AI soovitused
+            {ai.highMatchCount > 0 && (
+              <span className="rounded-full bg-emerald-600 px-1.5 text-xs text-white" title={`${ai.highMatchCount} vihjet sobivusega vähemalt ${HIGH_MATCH}%`}>
+                {ai.highMatchCount}
+              </span>
+            )}
+          </button>
           <button type="button" role="tab" aria-selected={view === "all"} className={tabClass(view === "all")} onClick={() => setView("all")}>
-            <LayoutGrid className="h-4 w-4" aria-hidden />
-            Kõik müügivihjed
+            <LayoutGrid className="hidden h-4 w-4 sm:block" aria-hidden />
+            <span className="sm:hidden">Kõik</span>
+            <span className="hidden sm:inline">Kõik müügivihjed</span>
           </button>
           <button type="button" role="tab" aria-selected={view === "saved"} className={tabClass(view === "saved")} onClick={() => setView("saved")}>
             <Star className="h-4 w-4" aria-hidden />
-            Salvestatud / Lemmikud
+            <span className="sm:hidden">Lemmikud</span>
+            <span className="hidden sm:inline">Salvestatud / Lemmikud</span>
             {favCount > 0 && <span className="rounded-full bg-brand px-1.5 text-xs text-white">{favCount}</span>}
           </button>
         </div>
@@ -100,8 +177,74 @@ export default function LeadsExplorer() {
         <FilterPanel filters={filters} onChange={setFilters} options={options} variant="bar" />
       </section>
 
+      {/* AI summary (AI view, after an analysis) */}
+      {view === "ai" && (scoredLeads.length > 0 || ai.running) && (
+        <section className="mb-4 rounded-xl border border-brand/20 bg-white p-4 shadow-sm" aria-label="AI analüüsi kokkuvõte">
+          {ai.running && (
+            <div className="mb-3">
+              <p className="mb-2 flex items-center gap-2 text-sm font-medium text-brand" role="status">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                {ai.apiKey || ai.serverKey ? "AI analüüsib kuni 30 kõige lootustandvamat vihjet…" : "Hindan müügivihjete sobivust…"}
+              </p>
+              <div className="progress-indeterminate" aria-hidden />
+            </div>
+          )}
+          {scoredLeads.length > 0 && (
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm text-slate-800">
+                  <span className="font-semibold">Analüüsitud {formatNumber(scoredLeads.length)} vihjet</span>
+                  {" · "}
+                  <span className="font-semibold text-emerald-700">{formatNumber(highInView)} hästi sobivat</span> (≥{HIGH_MATCH}%)
+                </p>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Hinnang: {engineLabel}
+                  {ai.scoreState.analyzedAt ? ` · ${formatDateTime(ai.scoreState.analyzedAt)}` : ""}
+                </p>
+                {ai.profile.description && (
+                  <p className="mt-2 line-clamp-2 text-xs italic text-slate-500" title={ai.profile.description}>
+                    „{ai.profile.description}”
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <button type="button" className="btn-secondary" onClick={() => ai.openProfile()}>
+                  <Pencil className="h-4 w-4" aria-hidden />
+                  Muuda profiili
+                </button>
+                <button type="button" className="btn-ghost" onClick={ai.clearScores} disabled={ai.running} title="Eemalda kõik AI hinnangud">
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                  <span className="sr-only sm:not-sr-only">Tühjenda</span>
+                </button>
+              </div>
+            </div>
+          )}
+          {ai.outdated && !ai.running && (
+            <p className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-sm text-amber-800">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              Profiil on pärast viimast analüüsi muutunud. Käivita analüüs uuesti, et hinnangud vastaksid uuele profiilile.
+            </p>
+          )}
+          {ai.warning && !ai.running && (
+            <p className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-sm text-amber-800" role="status">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              {ai.warning}
+            </p>
+          )}
+        </section>
+      )}
+
+      {ai.error && !ai.running && (
+        <p className="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          {ai.error}
+        </p>
+      )}
+
       {/* Toolbar */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
+        {analyzeButton("w-full sm:w-auto")}
+
         <button type="button" onClick={() => setDrawerOpen(true)} className="btn-secondary lg:hidden" aria-haspopup="dialog">
           <SlidersHorizontal className="h-4 w-4" aria-hidden />
           Filtrid
@@ -119,16 +262,30 @@ export default function LeadsExplorer() {
 
         <label className="flex items-center gap-2 text-sm text-slate-600">
           <span className="hidden sm:inline">Järjestus</span>
-          <select
-            value={filters.sort}
-            onChange={(e) => setFilters({ ...filters, sort: e.target.value as SortOrder })}
-            className="input w-auto py-0"
-            aria-label="Järjestus"
-            title="Järjesta dokumendi kuupäeva järgi"
-          >
-            <option value="newest">Uuemad ees</option>
-            <option value="oldest">Vanemad ees</option>
-          </select>
+          {view === "ai" ? (
+            <select
+              value={aiSort}
+              onChange={(e) => setAiSort(e.target.value as AiSort)}
+              className="input w-auto py-0"
+              aria-label="Järjestus"
+              title="Järjesta sobivuse või kuupäeva järgi"
+            >
+              <option value="score">Sobivus (kõrgeim ees)</option>
+              <option value="newest">Uuemad ees</option>
+              <option value="oldest">Vanemad ees</option>
+            </select>
+          ) : (
+            <select
+              value={filters.sort}
+              onChange={(e) => setFilters({ ...filters, sort: e.target.value as SortOrder })}
+              className="input w-auto py-0"
+              aria-label="Järjestus"
+              title="Järjesta dokumendi kuupäeva järgi"
+            >
+              <option value="newest">Uuemad ees</option>
+              <option value="oldest">Vanemad ees</option>
+            </select>
+          )}
         </label>
 
         <div className="flex w-full gap-2 sm:w-auto">
@@ -140,12 +297,14 @@ export default function LeadsExplorer() {
             className="flex-1 sm:flex-none"
             align="left"
             onExport={(format) =>
-              downloadLeads(
-                results,
-                view === "saved" ? "goodsales-lemmikud-filtreeritud" : "goodsales-muugivihjed",
-                format,
-                view === "saved" ? "Lemmikud" : "Müügivihjed",
-              )
+              view === "ai"
+                ? downloadLeads(results, "goodsales-ai-soovitused", format, "AI soovitused", ai.scores)
+                : downloadLeads(
+                    results,
+                    view === "saved" ? "goodsales-lemmikud-filtreeritud" : "goodsales-muugivihjed",
+                    format,
+                    view === "saved" ? "Lemmikud" : "Müügivihjed",
+                  )
             }
           />
           <ExportButton
@@ -178,7 +337,7 @@ export default function LeadsExplorer() {
             </button>
           }
         />
-      ) : view === "all" && leads.length === 0 ? (
+      ) : view !== "saved" && leads.length === 0 ? (
         <EmptyState
           icon={<Inbox className="h-8 w-8 text-slate-400" aria-hidden />}
           title="Andmestik on tühi"
@@ -191,11 +350,38 @@ export default function LeadsExplorer() {
             )
           }
         />
+      ) : view === "ai" && scoredLeads.length === 0 ? (
+        ai.running ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3" aria-busy="true" aria-label="Analüüsin müügivihjeid">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="h-96 animate-pulse rounded-xl border border-slate-200 bg-white" />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon={<Sparkles className="h-8 w-8 text-brand" aria-hidden />}
+            title="AI soovitusi pole veel"
+            text={
+              profileReady
+                ? "Käivita analüüs: süsteem hindab praeguste filtritega müügivihjete sobivust sinu ettevõtte profiiliga ja selgitab, miks need on olulised."
+                : "Seadista oma ettevõtte profiil – kirjelda, mida müüd, ja vali sobivad piirkonnad ning objektitüübid. Seejärel hindab süsteem iga müügivihje sobivust."
+            }
+            action={
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button type="button" className="btn-secondary" onClick={() => ai.openProfile()}>
+                  <Pencil className="h-4 w-4" aria-hidden />
+                  {profileReady ? "Muuda profiili" : "Seadista profiil"}
+                </button>
+                {analyzeButton()}
+              </div>
+            }
+          />
+        )
       ) : view === "saved" && savedLeads.length === 0 ? (
         <EmptyState
           icon={<StarOff className="h-8 w-8 text-slate-400" aria-hidden />}
           title="Salvestatud müügivihjeid pole"
-          text="Vajuta kaardil tärni, et lisada müügivihje lemmikutesse. Lemmikud salvestatakse selles brauseris."
+          text="Vajuta kaardil tärni, et lisada müügivihje lemmikutesse. Lemmikud salvestatakse selles brauseris ja aitavad AI-l sinu eelistusi õppida."
           action={
             <button type="button" className="btn-primary" onClick={() => setView("all")}>
               Vaata kõiki müügivihjeid
@@ -215,9 +401,9 @@ export default function LeadsExplorer() {
         />
       ) : (
         <>
-          <div className={`grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 ${stale ? "opacity-70" : ""}`}>
+          <div className={`grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 ${stale || (view === "ai" && ai.running) ? "opacity-70" : ""}`}>
             {visible.map((lead) => (
-              <LeadCard key={lead.id} lead={lead} favorite={isFavorite(lead.id)} onToggleFavorite={toggle} />
+              <LeadCard key={lead.id} lead={lead} favorite={isFavorite(lead.id)} onToggleFavorite={toggle} score={ai.scores[lead.id]} />
             ))}
           </div>
           {hasMore && (

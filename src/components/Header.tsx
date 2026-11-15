@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Building2, LayoutGrid, LogOut, Menu, Settings, ShieldCheck, Star, X } from "lucide-react";
+import { Building2, LayoutGrid, LogOut, Menu, Settings, ShieldCheck, Sparkles, Star, X } from "lucide-react";
 import { useAdmin } from "@/context/AdminContext";
+import { useAi } from "@/context/AiContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useView, type LeadView } from "@/context/ViewContext";
 
@@ -13,6 +14,12 @@ export default function Header() {
   const { view, setView } = useView();
   const { count } = useFavorites();
   const { isAdmin, openLogin, logout } = useAdmin();
+  const { openProfile, highMatchCount } = useAi();
+
+  function onProfile() {
+    setOpen(false);
+    openProfile();
+  }
   const pathname = usePathname();
   const router = useRouter();
   const onHome = pathname === "/";
@@ -57,7 +64,7 @@ export default function Header() {
         </Link>
 
         {/* Desktop navigation */}
-        <nav className="hidden items-center gap-1 md:flex" aria-label="Põhinavigatsioon">
+        <nav className="hidden items-center gap-1 lg:flex" aria-label="Põhinavigatsioon">
           <button type="button" className={navItem(onHome && view === "all")} onClick={() => goView("all")}>
             <LayoutGrid className="h-4 w-4" aria-hidden />
             Kõik müügivihjed
@@ -70,6 +77,15 @@ export default function Header() {
                 {count}
               </span>
             )}
+          </button>
+          <button
+            type="button"
+            onClick={onProfile}
+            className="tap ml-1 gap-2 rounded-lg bg-white px-3 text-sm font-semibold text-brand shadow-sm transition-colors hover:bg-brand-50"
+            title="Seadista ettevõtte profiil ja AI-soovitused"
+          >
+            <Sparkles className="h-4 w-4" aria-hidden />
+            Minu profiil / AI
           </button>
           <span className="mx-2 h-6 w-px bg-white/25" aria-hidden />
           <button type="button" className={navItem(pathname.startsWith("/haldus"))} onClick={onAdmin}>
@@ -87,7 +103,7 @@ export default function Header() {
         {/* Mobile hamburger */}
         <button
           type="button"
-          className="tap -mr-2 rounded-lg text-white hover:bg-white/10 md:hidden"
+          className="tap -mr-2 rounded-lg text-white hover:bg-white/10 lg:hidden"
           aria-label={open ? "Sulge menüü" : "Ava menüü"}
           aria-expanded={open}
           aria-controls="mobile-menu"
@@ -99,8 +115,17 @@ export default function Header() {
 
       {/* Mobile menu */}
       {open && (
-        <div id="mobile-menu" className="border-t border-white/15 bg-brand md:hidden">
+        <div id="mobile-menu" className="border-t border-white/15 bg-brand lg:hidden">
           <nav className="mx-auto flex max-w-7xl flex-col gap-1 px-4 py-3" aria-label="Mobiilne navigatsioon">
+            <button type="button" className={`${navItem(onHome && view === "ai")} justify-start`} onClick={() => goView("ai")}>
+              <Sparkles className="h-5 w-5" aria-hidden />
+              AI soovitused
+              {highMatchCount > 0 && (
+                <span className="ml-auto rounded-full bg-white px-2 text-xs font-semibold text-brand" aria-label={`${highMatchCount} hästi sobivat`}>
+                  {highMatchCount}
+                </span>
+              )}
+            </button>
             <button type="button" className={`${navItem(onHome && view === "all")} justify-start`} onClick={() => goView("all")}>
               <LayoutGrid className="h-5 w-5" aria-hidden />
               Kõik müügivihjed
@@ -109,6 +134,10 @@ export default function Header() {
               <Star className="h-5 w-5" aria-hidden />
               Salvestatud / Lemmikud
               {count > 0 && <span className="ml-auto rounded-full bg-white px-2 text-xs font-semibold text-brand">{count}</span>}
+            </button>
+            <button type="button" className="tap mt-1 justify-start gap-2 rounded-lg bg-white px-3 text-sm font-semibold text-brand" onClick={onProfile}>
+              <Sparkles className="h-5 w-5" aria-hidden />
+              Minu profiil / AI
             </button>
             <div className="my-1 h-px bg-white/15" aria-hidden />
             <button type="button" className={`${navItem(pathname.startsWith("/haldus"))} justify-start`} onClick={onAdmin}>

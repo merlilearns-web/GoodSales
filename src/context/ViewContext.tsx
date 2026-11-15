@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 
-export type LeadView = "all" | "saved";
+export type LeadView = "ai" | "all" | "saved";
 
 interface ViewContextValue {
   view: LeadView;

@@ -1,3 +1,4 @@
+import type { LeadScore } from "./ai/types";
 import { formatDate, todayIso } from "./format";
 import type { Lead } from "./types";
 
@@ -24,9 +25,23 @@ const COLUMNS: Column[] = [
   { header: "Menetlev asutus", width: 32, get: (l) => l.authority },
 ];
 
-const DATE_COL = 0;
+const DATE_HEADER = "Dokumendi kuupäev";
+const SCORE_HEADER = "Sobivus %";
 /** Excel stores at most 32,767 characters in a cell. */
 const MAX_CELL = 32_000;
+
+export type ScoreMap = Record<string, LeadScore>;
+
+/** With AI scores: match % and suggested action first, explanation last. */
+function columnsFor(scores?: ScoreMap): Column[] {
+  if (!scores) return COLUMNS;
+  return [
+    { header: SCORE_HEADER, width: 11, get: (l) => (scores[l.id] ? String(scores[l.id].score) : "") },
+    { header: "Soovitatav tegevus", width: 26, get: (l) => scores[l.id]?.suggestedAction ?? "" },
+    ...COLUMNS,
+    { header: "AI põhjendus", width: 80, get: (l) => scores[l.id]?.reason ?? "" },
+  ];
+}
 
 /** Neutralise spreadsheet formula injection (values starting with = + - @). */
 function safeText(v: string): string {
@@ -40,10 +55,11 @@ function csvCell(v: string): string {
 }
 
 /** Comma-separated UTF-8 CSV with BOM (RFC 4180), for importing into CRMs and Google Sheets. */
-export function leadsToCsv(leads: Lead[]): string {
-  const lines = [COLUMNS.map((c) => csvCell(c.header)).join(",")];
+export function leadsToCsv(leads: Lead[], scores?: ScoreMap): string {
+  const cols = columnsFor(scores);
+  const lines = [cols.map((c) => csvCell(c.header)).join(",")];
   for (const l of leads) {
-    lines.push(COLUMNS.map((c, i) => csvCell(i === DATE_COL ? (l.date ? formatDate(l.date) : "") : c.get(l))).join(","));
+    lines.push(cols.map((c) => csvCell(c.header === DATE_HEADER ? (l.date ? formatDate(l.date) : "") : c.get(l))).join(","));
   }
   return "﻿" + lines.join("\r\n");
 }
@@ -60,20 +76,28 @@ function excelSerial(iso: string): number | null {
 }
 
 /** Builds an .xlsx workbook: one row per lead, real date cells, column widths and filter buttons on the header. */
-export function buildLeadsWorkbook(XLSX: XLSXModule, leads: Lead[], sheetName = "Müügivihjed") {
-  const rows: string[][] = [COLUMNS.map((c) => c.header)];
-  for (const l of leads) rows.push(COLUMNS.map((c) => safeText(c.get(l)).slice(0, MAX_CELL)));
+export function buildLeadsWorkbook(XLSX: XLSXModule, leads: Lead[], sheetName = "Müügivihjed", scores?: ScoreMap) {
+  const cols = columnsFor(scores);
+  const rows: string[][] = [cols.map((c) => c.header)];
+  for (const l of leads) rows.push(cols.map((c) => safeText(c.get(l)).slice(0, MAX_CELL)));
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
+  const dateCol = cols.findIndex((c) => c.header === DATE_HEADER);
+  const scoreCol = cols.findIndex((c) => c.header === SCORE_HEADER);
 
-  // Turn the date column into real Excel dates so sorting and date filters work.
   for (let r = 1; r < rows.length; r++) {
-    const addr = XLSX.utils.encode_cell({ r, c: DATE_COL });
+    // Real Excel dates so sorting and date filters work.
+    const addr = XLSX.utils.encode_cell({ r, c: dateCol });
     const serial = excelSerial(leads[r - 1].date);
     ws[addr] = serial === null ? { t: "s", v: "" } : { t: "n", v: serial, z: "dd.mm.yyyy" };
+    // Match % as a number so it can be sorted and filtered.
+    if (scoreCol >= 0) {
+      const s = scores?.[leads[r - 1].id]?.score;
+      ws[XLSX.utils.encode_cell({ r, c: scoreCol })] = s === undefined ? { t: "s", v: "" } : { t: "n", v: s };
+    }
   }
 
-  ws["!cols"] = COLUMNS.map((c) => ({ wch: c.width }));
+  ws["!cols"] = cols.map((c) => ({ wch: c.width }));
   ws["!autofilter"] = { ref: ws["!ref"] ?? "A1" };
 
   const wb = XLSX.utils.book_new();
@@ -155,15 +179,21 @@ function triggerDownload(blob: Blob, fileName: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function downloadLeads(leads: Lead[], baseName: string, format: ExportFormat, sheetName?: string): Promise<void> {
+export async function downloadLeads(
+  leads: Lead[],
+  baseName: string,
+  format: ExportFormat,
+  sheetName?: string,
+  scores?: ScoreMap,
+): Promise<void> {
   const fileBase = `${baseName}-${todayIso()}`;
   if (format === "csv") {
-    triggerDownload(new Blob([leadsToCsv(leads)], { type: "text/csv;charset=utf-8" }), `${fileBase}.csv`);
+    triggerDownload(new Blob([leadsToCsv(leads, scores)], { type: "text/csv;charset=utf-8" }), `${fileBase}.csv`);
     return;
   }
   // Load the Excel writer only when it is needed.
   const XLSX = await import("xlsx");
-  const wb = buildLeadsWorkbook(XLSX, leads, sheetName);
+  const wb = buildLeadsWorkbook(XLSX, leads, sheetName, scores);
   const raw = new Uint8Array(XLSX.write(wb, { bookType: "xlsx", type: "array", compression: true }) as ArrayBuffer);
   const data = styleHeaderRow(XLSX, raw);
   triggerDownload(

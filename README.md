@@ -23,6 +23,19 @@ Ehitisregister (EHR) "Projekteerimistingimuste taotlus" exports. The UI is entir
     The free SheetJS edition doesn't write styles, so `styleHeaderRow` patches the generated file.
     The Excel writer is loaded only when someone exports.
   - **CSV**: comma-separated UTF-8 with BOM (RFC 4180), for CRM or Google Sheets imports.
+- **AI recommendations ("AI soovitused")**: each user describes their company in "Minu profiil / AI"
+  (what they sell, target regions and counties, building types, and an optional OpenAI key). Their
+  profile, key, learned preferences and scores are stored in that browser's localStorage.
+  "Analüüsi vihjeid minu profiili järgi" scores the currently filtered leads 1–100 and adds an
+  Estonian explanation and a suggested action to each card.
+  - `src/lib/ai/scoring.ts`: the local algorithm. It uses Estonian stem and synonym groups, region
+    match, recency, application status and learned favorites. It is used when there is no OpenAI key
+    and when OpenAI fails, and it pre-selects the 30 best candidates for OpenAI.
+  - `src/app/api/recommend/route.ts` + `src/lib/ai/openai.ts`: OpenAI (`gpt-4o-mini`, Structured
+    Outputs) with the user's key from the `x-openai-key` header, or the server's `OPENAI_API_KEY`.
+    Use of the server key is rate limited (20 analyses per 10 minutes per IP).
+  - Starring a lead teaches the system: names and categories of favorites (`userPreferences`) feed
+    both the local score and the OpenAI prompt.
 - **Admin (`/haldus`)**, password protected: dataset metadata, upload a new `.xlsx` to replace the
   dataset for every visitor, restore the bundled default file, or clear the dataset. Other visitors
   pick up changes within 60 seconds, or immediately when they return to the tab.
@@ -64,6 +77,8 @@ See `.env.example`.
 | `ADMIN_SECRET`         | Optional secret used to sign the admin session cookie      |
 | `DATABASE_URL`         | Railway PostgreSQL connection string                      |
 | `DEFAULT_DATASET_FILE` | Optional default `.xlsx` file name in `public/`           |
+| `OPENAI_API_KEY`       | Optional server-side OpenAI key for AI scoring            |
+| `OPENAI_MODEL`         | Optional OpenAI model (default `gpt-4o-mini`)             |
 
 ## Deployment
 
