@@ -26,11 +26,19 @@ Ehitisregister (EHR) "Projekteerimistingimuste taotlus" exports. The UI is entir
 - **AI recommendations ("AI soovitused")**: each user describes their company in "Minu profiil / AI"
   (what they sell, target regions and counties, building types, and an optional OpenAI key). Their
   profile, key, learned preferences and scores are stored in that browser's localStorage.
-  "Analüüsi vihjeid minu profiili järgi" scores the currently filtered leads 1–100 and adds an
-  Estonian explanation and a suggested action to each card.
-  - `src/lib/ai/scoring.ts`: the local algorithm. It uses Estonian stem and synonym groups, region
-    match, recency, application status and learned favorites. It is used when there is no OpenAI key
-    and when OpenAI fails, and it pre-selects the 30 best candidates for OpenAI.
+  Scoring runs automatically: on page load when a profile exists, when the dataset changes, and
+  when the profile is saved. Every lead in the dataset is scored 1–100 in the browser and gets an
+  Estonian explanation and a suggested action. "AI soovitused" (the default tab) shows leads
+  scoring ≥ 60 %. Manual filters sit in a collapsed "Manuaalsed filtrid" accordion.
+  - `src/lib/ai/scoring.ts`: the local algorithm. It uses Estonian stem and synonym groups, building
+    type, recency, application status and learned favorites (0–60 points), plus location. With
+    target areas, in-area leads get +45 and out-of-area leads get −50 and are capped at 45 %. Target
+    areas come from the chosen counties, the chosen regions, and places named in the description
+    (`src/lib/regions.ts`). Wrong building types are capped at 55 %. It runs when there is no OpenAI
+    key and when OpenAI fails, and it picks the 30 best candidates for OpenAI. OpenAI results are
+    cached per profile and dataset version, so page loads don't repeat API calls.
+  - Profile panel: choosing a region selects all its counties. Counties can also be picked one at a
+    time, and a region is marked selected when all its counties are.
   - `src/app/api/recommend/route.ts` + `src/lib/ai/openai.ts`: OpenAI (`gpt-4o-mini`, Structured
     Outputs) with the user's key from the `x-openai-key` header, or the server's `OPENAI_API_KEY`.
     Use of the server key is rate limited (20 analyses per 10 minutes per IP).

@@ -3,14 +3,17 @@
  * Used when no OpenAI key is available, as a fallback when OpenAI fails, and to
  * pre-select the best candidates before sending a small batch to OpenAI.
  *
- * Score (clamped to 1–100) =
- *   type fit 0–40   building category vs. preferred types / types inferred from the description
- *   text fit 0–15   Estonian word-stem overlap between the description and the building name
- *   location 0–20   preferred counties / regions
- *   recency  0–15   days since "Dokumendi kuupäev"
- *   status   0–10   early-stage applications are the best time to reach out
- *   learned  0–10   similarity to leads the user has starred
+ * Fit (0–60) =
+ *   type fit 0–30   building category vs. preferred types / types inferred from the description
+ *   text fit 0–10   Estonian word-stem overlap between the description and the building name
+ *   recency  0–8    days since "Dokumendi kuupäev"
+ *   status   0–6    early-stage applications are the best time to reach out
+ *   learned  0–6    similarity to leads the user has starred
+ * Location (target area = chosen counties/regions + places named in the description):
+ *   inside the area +45, outside −50 from a neutral +30 and capped at 45 %, no area set: +30.
+ * Caps: wrong building type ≤ 55 %, refused application ≤ 35 %. Final score clamped to 1–100.
  */
+import { COUNTY_REGION, detectLocations, expandToCounties, shortCounty } from "../regions";
 import type { CompanyProfile, LeadInput, LeadScore, UserPreferences } from "./types";
 
 const C = {
@@ -120,13 +123,20 @@ function meaningfulStems(text: string): Set<string> {
 }
 
 const STATUS_POINTS: Record<string, number> = {
-  esitatud: 10,
-  menetluses: 10,
-  taiendamisel: 8,
-  "lubatud/teavitatud": 6,
-  "registrisse kantud": 4,
+  esitatud: 6,
+  menetluses: 6,
+  taiendamisel: 5,
+  "lubatud/teavitatud": 4,
+  "registrisse kantud": 2,
   keeldutud: 0,
 };
+
+/** Location weighting when the user has target areas */
+const LOCATION_BOOST = 45;
+const LOCATION_PENALTY = 50;
+const OUTSIDE_AREA_MAX = 45;
+/** A lead of a building type the profile does not target can never become a recommendation */
+const WRONG_TYPE_MAX = 55;
 
 const STATUS_PHRASE: Record<string, string> = {
   esitatud: "taotlus on äsja esitatud",
@@ -147,8 +157,10 @@ export interface ScoringContext {
   descStems: Set<string>;
   likedStems: Set<string>;
   likedCategories: Record<string, number>;
+  /** Target counties: chosen in the profile, expanded from chosen regions, or named in the description */
   counties: Set<string>;
-  regions: Set<string>;
+  /** Target areas mentioned only in the description (for the explanation) */
+  textAreas: string[];
   now: number;
 }
 
@@ -170,6 +182,10 @@ export function buildScoringContext(profile: CompanyProfile, prefs?: UserPrefere
   const likedStems = new Set<string>();
   for (const name of prefs?.likedNames ?? []) for (const s of meaningfulStems(name)) likedStems.add(s);
 
+  // Target area = selected counties + counties of selected regions + places named in the description.
+  const fromText = detectLocations(profile.description);
+  const counties = new Set(expandToCounties(profile.regions, [...profile.counties, ...fromText.counties]));
+
   return {
     profile,
     inferred,
@@ -177,8 +193,8 @@ export function buildScoringContext(profile: CompanyProfile, prefs?: UserPrefere
     descStems: meaningfulStems(profile.description),
     likedStems,
     likedCategories: prefs?.likedCategories ?? {},
-    counties: new Set(profile.counties),
-    regions: new Set(profile.regions),
+    counties,
+    textAreas: [...fromText.regions, ...fromText.counties.filter((c) => !fromText.regions.some((r) => COUNTY_REGION[c] === r)).map(shortCounty)],
     now,
   };
 }
@@ -198,71 +214,77 @@ export function scoreLeadLocal(lead: LeadInput, ctx: ScoringContext): LeadScore 
   const { profile } = ctx;
   const status = fold(lead.status.trim());
 
-  // 1. Type fit (0–40)
+  // 1. Type fit (0–30)
   let typePts: number;
   let fitClause: string;
+  let wrongType = false;
   const inferred = ctx.inferred.get(lead.category);
   if (profile.categories.length) {
     if (profile.categories.includes(lead.category)) {
-      typePts = 40;
+      typePts = 30;
       fitClause = "vastab teie eelistatud objektitüübile";
     } else if (inferred) {
-      typePts = inferred.primary ? 24 : 16;
+      typePts = inferred.primary ? 20 : 12;
+      // Only implied by the product/trade while the user picked specific types: shown, never recommended.
+      wrongType = !inferred.primary;
       fitClause = `sobib teie tegevusalaga (${inferred.label})`;
     } else {
-      typePts = 5;
+      typePts = 0;
+      wrongType = true;
       fitClause = "objektitüüp ei kuulu teie eelistuste hulka";
     }
   } else if (ctx.inferred.size) {
-    typePts = inferred ? (inferred.primary ? 36 : 20) : 6;
+    typePts = inferred ? (inferred.primary ? 28 : 16) : 0;
+    // Secondary = type only implied by the trade (e.g. "ehitame") although the description names specific types.
+    wrongType = !inferred || !inferred.primary;
     fitClause = inferred
       ? inferred.primary
         ? `sobib teie sihtrühmaga (${inferred.label})`
         : `võib vajada teie lahendusi (${inferred.label})`
       : "objektitüüp ei ole teie tegevusalaga otseselt seotud";
   } else {
-    typePts = 20;
+    typePts = 15;
     fitClause = "";
   }
 
-  // 2. Text fit (0–15): shared word stems + business lines mentioned in the building name
+  // 2. Text fit (0–10): shared word stems + business lines mentioned in the building name
   const nameWords = words(lead.buildingName);
   let overlap = 0;
   for (const s of meaningfulStems(lead.buildingName)) if (ctx.descStems.has(s)) overlap++;
   const nameGroupHit = ctx.descGroups.some((g) => g.targets.length < ALL_BUILDINGS.length && groupMatches(g, nameWords));
-  const textPts = Math.min(15, (overlap >= 2 ? 15 : overlap === 1 ? 10 : 0) + (nameGroupHit ? 8 : 0));
+  const textPts = Math.min(10, (overlap >= 2 ? 10 : overlap === 1 ? 6 : 0) + (nameGroupHit ? 5 : 0));
 
-  // 3. Location (0–20)
-  let locPts: number;
-  let locClause = "";
-  const anyLoc = ctx.counties.size > 0 || ctx.regions.size > 0;
-  if (!anyLoc) {
-    locPts = 12;
-  } else if (ctx.counties.has(lead.county)) {
-    locPts = 20;
-    locClause = "asub teie sihtpiirkonnas";
-  } else if (ctx.regions.has(lead.region)) {
-    locPts = ctx.counties.size ? 10 : 18;
-    locClause = "asub teie sihtregioonis";
-  } else {
-    locPts = 0;
-    locClause = "asub väljaspool teie sihtpiirkondi";
-  }
-
-  // 4. Recency (0–15)
+  // 3. Recency (0–8)
   const days = daysSince(lead.date, ctx.now);
-  const recencyPts = days === null ? 4 : days <= 14 ? 15 : days <= 30 ? 13 : days <= 60 ? 10 : days <= 90 ? 7 : days <= 180 ? 4 : 2;
+  const recencyPts = days === null ? 2 : days <= 14 ? 8 : days <= 30 ? 7 : days <= 60 ? 5 : days <= 90 ? 4 : days <= 180 ? 2 : 1;
 
-  // 5. Status (0–10)
-  const statusPts = STATUS_POINTS[status] ?? 5;
+  // 4. Status (0–6)
+  const statusPts = STATUS_POINTS[status] ?? 3;
 
-  // 6. Learned from favorites (0–10)
+  // 5. Learned from favorites (0–6)
   const likedCat = ctx.likedCategories[lead.category] ?? 0;
   let likedOverlap = 0;
   for (const s of meaningfulStems(lead.buildingName)) if (ctx.likedStems.has(s)) likedOverlap++;
-  const learnedPts = Math.min(10, Math.min(6, likedCat * 2) + (likedOverlap ? 4 : 0));
+  const learnedPts = Math.min(6, Math.min(4, likedCat * 2) + (likedOverlap ? 2 : 0));
 
-  let score = typePts + textPts + locPts + recencyPts + statusPts + learnedPts;
+  // 6. Location: decisive in construction sales.
+  //    Target area set: inside +45, outside −50 and never above 45 %. No target area: neutral +30.
+  const fit = typePts + textPts + recencyPts + statusPts + learnedPts; // 0–60
+  let score: number;
+  let locClause = "";
+  const inArea = ctx.counties.has(lead.county);
+  if (ctx.counties.size === 0) {
+    score = fit + 30;
+  } else if (inArea) {
+    score = fit + LOCATION_BOOST;
+    locClause = ctx.textAreas.length && !profile.counties.includes(lead.county) && !profile.regions.includes(lead.region)
+      ? `asub teie kirjelduses nimetatud piirkonnas (${ctx.textAreas.join(", ")})`
+      : "asub teie sihtpiirkonnas";
+  } else {
+    score = Math.min(OUTSIDE_AREA_MAX, fit + 30 - LOCATION_PENALTY);
+    locClause = "asub väljaspool teie sihtpiirkondi";
+  }
+  if (wrongType) score = Math.min(score, WRONG_TYPE_MAX);
   if (status === "keeldutud") score = Math.min(score, 35);
   score = Math.max(1, Math.min(100, Math.round(score)));
 

@@ -55,8 +55,10 @@ export interface RecommendResponse {
 }
 
 export const OPENAI_BATCH_SIZE = 30;
+/** Max leads the server scores locally per request (the browser scores the whole dataset itself) */
 export const LOCAL_BATCH_SIZE = 300;
-export const HIGH_MATCH = 70;
+/** Leads at or above this score are shown in "AI soovitused" and counted in its badge */
+export const RECOMMEND_THRESHOLD = 60;
 
 export function profileIsEmpty(p: CompanyProfile): boolean {
   return !p.description.trim() && p.categories.length === 0 && p.regions.length === 0 && p.counties.length === 0;

@@ -9,6 +9,7 @@ import { useView } from "@/context/ViewContext";
 import { CATEGORY_ORDER, OTHER_CATEGORY } from "@/lib/categories";
 import { buildOptions } from "@/lib/filters";
 import { EMPTY_PROFILE, type CompanyProfile } from "@/lib/ai/types";
+import { COUNTY_REGION, REGION_COUNTIES, REGIONS, detectLocations, expandToCounties, regionsCoveredBy, shortCounty } from "@/lib/regions";
 import FilterDrawer from "./FilterDrawer";
 
 const DESCRIPTION_MAX = 2000;
@@ -55,28 +56,42 @@ export default function CompanyProfilePanel() {
     setShowKey(false);
   }, [ai.profileOpen, ai.profile, ai.apiKey]);
 
-  const options = useMemo(() => buildOptions(leads), [leads]);
-  const regions = options.regions.map((o) => o.value);
-  const counties = options.counties.map((o) => o.value);
+  // Counts per county in the current dataset, shown on the chips.
+  const countyCounts = useMemo(() => new Map(buildOptions(leads).counties.map((o) => [o.value, o.count])), [leads]);
   const categories = CATEGORY_ORDER.filter((c) => c !== OTHER_CATEGORY);
+  const detected = useMemo(() => detectLocations(draft.description), [draft.description]);
 
-  const toggle = (key: "regions" | "counties" | "categories", value: string) =>
-    setDraft((d) => ({ ...d, [key]: d[key].includes(value) ? d[key].filter((v) => v !== value) : [...d[key], value] }));
+  const toggleCategory = (value: string) =>
+    setDraft((d) => ({
+      ...d,
+      categories: d.categories.includes(value) ? d.categories.filter((v) => v !== value) : [...d.categories, value],
+    }));
+
+  // Counties are the source of truth; a region is "selected" when all of its counties are.
+  const setCounties = (counties: string[]) => setDraft((d) => ({ ...d, counties, regions: regionsCoveredBy(counties) }));
+  const toggleRegion = (region: string) => {
+    const members = REGION_COUNTIES[region];
+    const allOn = members.every((c) => draft.counties.includes(c));
+    setCounties(allOn ? draft.counties.filter((c) => !members.includes(c)) : expandToCounties([], [...draft.counties, ...members]));
+  };
+  const toggleCounty = (county: string) =>
+    setCounties(draft.counties.includes(county) ? draft.counties.filter((c) => c !== county) : expandToCounties([], [...draft.counties, county]));
 
   const canAnalyze = draft.description.trim().length > 0 || draft.categories.length > 0;
   const learned = Object.entries(ai.preferences.likedCategories).sort((a, b) => b[1] - a[1]);
   const likedTotal = learned.reduce((n, [, c]) => n + c, 0);
 
+  /** Saving always re-runs the analysis (automatic scoring). */
   function save() {
-    ai.saveProfile({ ...draft, description: draft.description.trim() });
+    ai.saveProfile({ ...draft, description: draft.description.trim(), regions: regionsCoveredBy(draft.counties) });
     ai.saveApiKey(keyDraft);
+    ai.reanalyze();
+    ai.closeProfile();
   }
 
-  function saveAndAnalyze() {
+  function saveAndShow() {
     save();
-    ai.closeProfile();
     setView("ai");
-    ai.requestAnalyze();
     if (pathname !== "/") router.push("/");
   }
 
@@ -90,17 +105,10 @@ export default function CompanyProfilePanel() {
       widthClass="max-w-lg"
       footer={
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => {
-              save();
-              ai.closeProfile();
-            }}
-          >
+          <button type="button" className="btn-secondary" onClick={save}>
             Salvesta
           </button>
-          <button type="button" className="btn-primary" disabled={!canAnalyze} onClick={saveAndAnalyze} title={canAnalyze ? undefined : "Kirjelda tegevusala või vali objektitüübid"}>
+          <button type="button" className="btn-primary" disabled={!canAnalyze} onClick={saveAndShow} title={canAnalyze ? undefined : "Kirjelda tegevusala või vali objektitüübid"}>
             <Sparkles className="h-4 w-4" aria-hidden />
             Salvesta ja analüüsi
           </button>
@@ -137,19 +145,51 @@ export default function CompanyProfilePanel() {
           </p>
         </Section>
 
-        <Section icon={MapPin} title="Eelistatud piirkonnad" hint="Kui midagi pole valitud, arvestatakse kõiki piirkondi.">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Regioonid</p>
-          <div className="flex flex-wrap gap-1.5">
-            {regions.map((r) => (
-              <Chip key={r} label={r} selected={draft.regions.includes(r)} onClick={() => toggle("regions", r)} />
-            ))}
+        <Section
+          icon={MapPin}
+          title="Eelistatud piirkonnad"
+          hint="Regiooni valimine märgib kõik selle maakonnad; maakondi saab valida ka ükshaaval. Väljaspool valitud piirkondi asuvaid vihjeid ei soovitata. Kui midagi pole valitud, arvestatakse kõiki piirkondi."
+        >
+          <div className="flex flex-col divide-y divide-slate-100">
+            {REGIONS.map((region) => {
+              const members = REGION_COUNTIES[region];
+              const allOn = members.every((c) => draft.counties.includes(c));
+              const someOn = !allOn && members.some((c) => draft.counties.includes(c));
+              return (
+                <div key={region} className="flex flex-col gap-1.5 py-2 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleRegion(region)}
+                    aria-pressed={allOn}
+                    title={`Vali kõik ${region} maakonnad`}
+                    className={`chip w-fit shrink-0 gap-1 font-semibold sm:w-32 sm:justify-start ${allOn ? "chip-active" : someOn ? "border-brand/50 text-brand" : ""}`}
+                  >
+                    {allOn && <Check className="h-3.5 w-3.5" aria-hidden />}
+                    {region}
+                  </button>
+                  <div className="flex flex-wrap gap-1.5">
+                    {members.map((c) => (
+                      <Chip
+                        key={c}
+                        label={`${shortCounty(c)}${countyCounts.has(c) ? ` · ${countyCounts.get(c)}` : ""}`}
+                        selected={draft.counties.includes(c)}
+                        onClick={() => toggleCounty(c)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <p className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Maakonnad</p>
-          <div className="flex flex-wrap gap-1.5">
-            {counties.map((c) => (
-              <Chip key={c} label={c.replace(" maakond", "")} selected={draft.counties.includes(c)} onClick={() => toggle("counties", c)} />
-            ))}
-          </div>
+          {(detected.regions.length > 0 || detected.counties.length > 0) && (
+            <p className="mt-3 flex items-start gap-1.5 rounded-lg bg-brand-50 p-2.5 text-xs text-brand">
+              <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>
+                Kirjelduses tuvastatud piirkond: <strong>{[...detected.regions, ...detected.counties.filter((c) => !detected.regions.includes(COUNTY_REGION[c])).map(shortCounty)].join(", ")}</strong>
+                {" "}– arvestatakse ka siis, kui seda pole ülal valitud.
+              </span>
+            </p>
+          )}
         </Section>
 
         <Section
@@ -159,7 +199,7 @@ export default function CompanyProfilePanel() {
         >
           <div className="flex flex-wrap gap-1.5">
             {categories.map((c) => (
-              <Chip key={c} label={c} selected={draft.categories.includes(c)} onClick={() => toggle("categories", c)} />
+              <Chip key={c} label={c} selected={draft.categories.includes(c)} onClick={() => toggleCategory(c)} />
             ))}
           </div>
         </Section>

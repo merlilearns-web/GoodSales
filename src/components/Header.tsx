@@ -14,7 +14,7 @@ export default function Header() {
   const { view, setView } = useView();
   const { count } = useFavorites();
   const { isAdmin, openLogin, logout } = useAdmin();
-  const { openProfile, highMatchCount } = useAi();
+  const { openProfile, recommendedCount } = useAi();
 
   function onProfile() {
     setOpen(false);
@@ -120,9 +120,9 @@ export default function Header() {
             <button type="button" className={`${navItem(onHome && view === "ai")} justify-start`} onClick={() => goView("ai")}>
               <Sparkles className="h-5 w-5" aria-hidden />
               AI soovitused
-              {highMatchCount > 0 && (
-                <span className="ml-auto rounded-full bg-white px-2 text-xs font-semibold text-brand" aria-label={`${highMatchCount} hästi sobivat`}>
-                  {highMatchCount}
+              {recommendedCount > 0 && (
+                <span className="ml-auto rounded-full bg-white px-2 text-xs font-semibold text-brand" aria-label={`${recommendedCount} sobivat vihjet`}>
+                  {recommendedCount}
                 </span>
               )}
             </button>

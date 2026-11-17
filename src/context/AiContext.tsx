@@ -1,15 +1,14 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { preselectLeads } from "@/lib/ai/scoring";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useData } from "@/context/DataContext";
+import { scoreLeadsLocal } from "@/lib/ai/scoring";
 import {
   EMPTY_PREFERENCES,
   EMPTY_PROFILE,
-  HIGH_MATCH,
-  LOCAL_BATCH_SIZE,
   OPENAI_BATCH_SIZE,
+  RECOMMEND_THRESHOLD,
   profileHash,
-  profileIsEmpty,
   type CompanyProfile,
   type LeadInput,
   type LeadScore,
@@ -17,27 +16,39 @@ import {
   type ScoringEngine,
   type UserPreferences,
 } from "@/lib/ai/types";
+import { expandToCounties } from "@/lib/regions";
 import { readJson, removeKey, writeJson } from "@/lib/storage";
 import type { Lead } from "@/lib/types";
 
 const PROFILE_KEY = "goodsales:profile:v1";
 const API_KEY_KEY = "goodsales:openaiKey";
 const PREFS_KEY = "goodsales:userPreferences";
-const SCORES_KEY = "goodsales:aiScores:v1";
+/** Only the OpenAI results are stored: local scores are recomputed in milliseconds on every load. */
+const AI_CACHE_KEY = "goodsales:aiScores:v2";
 
-interface ScoresState {
+interface AiCache {
   scores: Record<string, LeadScore>;
-  engine: ScoringEngine | null;
   model?: string;
-  analyzedAt: string | null;
-  /** Profile the scores were computed for */
-  profileHash: string | null;
+  analyzedAt: string;
+  profileHash: string;
+  datasetVersion: string;
 }
 
-const EMPTY_SCORES: ScoresState = { scores: {}, engine: null, analyzedAt: null, profileHash: null };
+export interface AnalysisInfo {
+  engine: ScoringEngine;
+  model?: string;
+  analyzedAt: string;
+  /** How many leads were scored (the whole dataset) */
+  total: number;
+  /** How many of them OpenAI scored */
+  aiCount: number;
+  profileHash: string;
+}
 
 interface AiContextValue {
   profile: CompanyProfile;
+  /** true when the profile has a description or building types, i.e. analysis can run */
+  profileReady: boolean;
   saveProfile: (p: CompanyProfile) => void;
   apiKey: string;
   saveApiKey: (key: string) => void;
@@ -49,24 +60,19 @@ interface AiContextValue {
   seedPreferences: (leads: Lead[]) => void;
 
   scores: Record<string, LeadScore>;
-  scoreState: ScoresState;
-  highMatchCount: number;
-  /** Scores were computed for a different profile than the current one */
-  outdated: boolean;
+  info: AnalysisInfo | null;
+  /** Leads at or above RECOMMEND_THRESHOLD */
+  recommendedCount: number;
   running: boolean;
   warning: string | null;
   error: string | null;
-  analyze: (candidates: Lead[]) => Promise<boolean>;
-  clearScores: () => void;
+  /** Re-run now; refreshes OpenAI results instead of using the cache */
+  reanalyze: () => void;
 
   profileOpen: boolean;
   openProfile: (hint?: string) => void;
   closeProfile: () => void;
   profileHint: string | null;
-  /** Set by "Salvesta ja analüüsi"; the leads view picks it up and runs the analysis */
-  analyzeRequested: boolean;
-  requestAnalyze: () => void;
-  consumeAnalyzeRequest: () => void;
 }
 
 const AiContext = createContext<AiContextValue | null>(null);
@@ -85,24 +91,40 @@ function toInput(l: Lead): LeadInput {
   };
 }
 
+/** Older profiles stored regions without their counties: counties are now the source of truth. */
+function normalizeProfile(p: CompanyProfile): CompanyProfile {
+  return { ...p, counties: expandToCounties(p.regions, p.counties) };
+}
+
 export function AiProvider({ children }: { children: ReactNode }) {
+  const { leads, meta, status: dataStatus } = useData();
+
   const [profile, setProfile] = useState<CompanyProfile>(EMPTY_PROFILE);
   const [apiKey, setApiKey] = useState("");
   const [serverKey, setServerKey] = useState(false);
+  const [serverKeyChecked, setServerKeyChecked] = useState(false);
   const [preferences, setPreferences] = useState<UserPreferences>(EMPTY_PREFERENCES);
   const [prefsStored, setPrefsStored] = useState(false);
-  const [scoreState, setScoreState] = useState<ScoresState>(EMPTY_SCORES);
+  const [scores, setScores] = useState<Record<string, LeadScore>>({});
+  const [info, setInfo] = useState<AnalysisInfo | null>(null);
   const [running, setRunning] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileHint, setProfileHint] = useState<string | null>(null);
-  const [analyzeRequested, setAnalyzeRequested] = useState(false);
   const [ready, setReady] = useState(false);
+  const [runNonce, setRunNonce] = useState(0);
+
+  const leadsRef = useRef(leads);
+  leadsRef.current = leads;
+  const prefsRef = useRef(preferences);
+  prefsRef.current = preferences;
+  const forceRef = useRef(false);
+  const runId = useRef(0);
 
   useEffect(() => {
     const p = readJson<CompanyProfile>(PROFILE_KEY);
-    if (p) setProfile({ ...EMPTY_PROFILE, ...p });
+    if (p) setProfile(normalizeProfile({ ...EMPTY_PROFILE, ...p }));
     try {
       setApiKey(window.localStorage.getItem(API_KEY_KEY) ?? "");
     } catch {
@@ -113,19 +135,121 @@ export function AiProvider({ children }: { children: ReactNode }) {
       setPreferences({ ...EMPTY_PREFERENCES, ...prefs });
       setPrefsStored(true);
     }
-    const s = readJson<ScoresState>(SCORES_KEY);
-    if (s?.scores) setScoreState({ ...EMPTY_SCORES, ...s });
+    removeKey("goodsales:aiScores:v1"); // format of the previous version
     setReady(true);
 
     fetch("/api/recommend", { cache: "no-store" })
       .then((r) => r.json())
       .then((d) => setServerKey(Boolean(d?.serverKey)))
-      .catch(() => setServerKey(false));
+      .catch(() => setServerKey(false))
+      .finally(() => setServerKeyChecked(true));
   }, []);
 
+  const profileReady = profile.description.trim().length > 0 || profile.categories.length > 0;
+  const hash = profileHash(profile);
+  const datasetVersion = meta?.version ?? "";
+
+  /* ---------- Automatic analysis ---------- */
+  // Runs on load (stored profile), when the dataset version changes, when the profile or key changes,
+  // and when reanalyze() is called (e.g. "Salvesta" in the profile panel).
+  useEffect(() => {
+    if (!ready || !serverKeyChecked || dataStatus === "loading") return;
+    const all = leadsRef.current;
+    const force = forceRef.current;
+    forceRef.current = false;
+    const id = ++runId.current;
+
+    if (!profileReady || all.length === 0) {
+      setScores({});
+      setInfo(null);
+      setWarning(null);
+      setError(null);
+      setRunning(false);
+      return;
+    }
+
+    setRunning(true);
+    setWarning(null);
+    setError(null);
+
+    // Let the spinner render before the (fast, synchronous) scoring of the whole dataset.
+    const timer = window.setTimeout(async () => {
+      const inputs = all.map(toInput);
+      const local = scoreLeadsLocal(inputs, profile, prefsRef.current);
+      if (id !== runId.current) return;
+
+      const now = new Date().toISOString();
+      const useAi = Boolean(apiKey || serverKey);
+      if (!useAi) {
+        setScores(local);
+        setInfo({ engine: "local", analyzedAt: now, total: inputs.length, aiCount: 0, profileHash: hash });
+        setRunning(false);
+        return;
+      }
+
+      // Cached OpenAI results for this exact profile and dataset: no new API call on page load.
+      const cache = readJson<AiCache>(AI_CACHE_KEY);
+      if (!force && cache && cache.profileHash === hash && cache.datasetVersion === datasetVersion) {
+        setScores({ ...local, ...cache.scores });
+        setInfo({
+          engine: "openai",
+          model: cache.model,
+          analyzedAt: cache.analyzedAt,
+          total: inputs.length,
+          aiCount: Object.keys(cache.scores).length,
+          profileHash: hash,
+        });
+        setRunning(false);
+        return;
+      }
+
+      // Show the local result right away, then refine the best candidates with OpenAI.
+      setScores(local);
+      const top = [...inputs]
+        .sort((a, b) => local[b.id].score - local[a.id].score || (a.date < b.date ? 1 : -1))
+        .slice(0, OPENAI_BATCH_SIZE);
+      try {
+        const res = await fetch("/api/recommend", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(apiKey ? { "x-openai-key": apiKey } : {}) },
+          body: JSON.stringify({ profile, preferences: prefsRef.current, leads: top }),
+        });
+        const data = (await res.json().catch(() => null)) as (RecommendResponse & { error?: string }) | null;
+        if (id !== runId.current) return;
+        if (!res.ok || !data?.scores) throw new Error(data?.error || "AI analüüs ebaõnnestus.");
+
+        const aiScores: Record<string, LeadScore> = {};
+        for (const [leadId, s] of Object.entries(data.scores)) if (s.source === "openai") aiScores[leadId] = s;
+        const aiCount = Object.keys(aiScores).length;
+        setScores({ ...local, ...aiScores });
+        setInfo({ engine: aiCount ? "openai" : "local", model: data.model, analyzedAt: now, total: inputs.length, aiCount, profileHash: hash });
+        if (data.warning) setWarning(data.warning);
+        if (aiCount) writeJson(AI_CACHE_KEY, { scores: aiScores, model: data.model, analyzedAt: now, profileHash: hash, datasetVersion } satisfies AiCache);
+      } catch (e) {
+        if (id !== runId.current) return;
+        setInfo({ engine: "local", analyzedAt: now, total: inputs.length, aiCount: 0, profileHash: hash });
+        setWarning(`${e instanceof Error ? e.message : "AI analüüs ebaõnnestus."} Kasutati lokaalset sobivusalgoritmi.`);
+      } finally {
+        if (id === runId.current) setRunning(false);
+      }
+    }, 30);
+
+    return () => window.clearTimeout(timer);
+    // Preferences are deliberately not a trigger: starring a lead must not reshuffle the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, serverKeyChecked, dataStatus, datasetVersion, hash, profileReady, apiKey, serverKey, runNonce]);
+
+  const reanalyze = useCallback(() => {
+    forceRef.current = true;
+    setRunNonce((n) => n + 1);
+  }, []);
+
+  /* ---------- Profile, key, preferences ---------- */
+
   const saveProfile = useCallback((p: CompanyProfile) => {
-    setProfile(p);
-    writeJson(PROFILE_KEY, p);
+    const next = normalizeProfile(p);
+    setProfile(next);
+    writeJson(PROFILE_KEY, next);
   }, []);
 
   const saveApiKey = useCallback((key: string) => {
@@ -167,13 +291,13 @@ export function AiProvider({ children }: { children: ReactNode }) {
     [updatePreferences],
   );
 
-  // Favorites saved before this feature existed: learn from them once.
+  // Favorites saved before the AI feature existed: learn from them once.
   const seedPreferences = useCallback(
-    (leads: Lead[]) => {
-      if (!ready || prefsStored || leads.length === 0) return;
+    (favs: Lead[]) => {
+      if (!ready || prefsStored || favs.length === 0) return;
       const cats: Record<string, number> = {};
-      for (const l of leads) cats[l.category] = (cats[l.category] ?? 0) + 1;
-      const names = [...new Set(leads.map((l) => l.buildingName.trim()).filter(Boolean))].slice(0, 30);
+      for (const l of favs) cats[l.category] = (cats[l.category] ?? 0) + 1;
+      const names = [...new Set(favs.map((l) => l.buildingName.trim()).filter(Boolean))].slice(0, 30);
       updatePreferences(() => ({ likedNames: names, likedCategories: cats }));
     },
     [ready, prefsStored, updatePreferences],
@@ -185,76 +309,20 @@ export function AiProvider({ children }: { children: ReactNode }) {
     setPrefsStored(true);
   }, []);
 
-  const clearScores = useCallback(() => {
-    setScoreState(EMPTY_SCORES);
-    removeKey(SCORES_KEY);
-    setWarning(null);
-    setError(null);
-  }, []);
-
-  const analyze = useCallback(
-    async (candidates: Lead[]) => {
-      setError(null);
-      setWarning(null);
-      if (candidates.length === 0) {
-        setError("Praeguste filtritega pole ühtegi müügivihjet, mida analüüsida.");
-        return false;
-      }
-      const useAi = Boolean(apiKey || serverKey);
-      const batch = preselectLeads(candidates.map(toInput), profile, preferences, useAi ? OPENAI_BATCH_SIZE : LOCAL_BATCH_SIZE);
-      setRunning(true);
-      try {
-        const res = await fetch("/api/recommend", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(apiKey ? { "x-openai-key": apiKey } : {}) },
-          body: JSON.stringify({ profile, preferences, leads: batch }),
-        });
-        const data = (await res.json().catch(() => null)) as (RecommendResponse & { error?: string }) | null;
-        if (!res.ok || !data?.scores) throw new Error(data?.error || "Analüüs ebaõnnestus.");
-
-        const hash = profileHash(profile);
-        setScoreState((prev) => {
-          // Same profile: add to earlier results (e.g. another filter selection). New profile: start over.
-          const base = prev.profileHash === hash ? prev.scores : {};
-          const next: ScoresState = {
-            scores: { ...base, ...data.scores },
-            engine: data.engine,
-            model: data.model,
-            analyzedAt: new Date().toISOString(),
-            profileHash: hash,
-          };
-          writeJson(SCORES_KEY, next);
-          return next;
-        });
-        if (data.warning) setWarning(data.warning);
-        return true;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Analüüs ebaõnnestus.");
-        return false;
-      } finally {
-        setRunning(false);
-      }
-    },
-    [apiKey, serverKey, profile, preferences],
-  );
-
   const openProfile = useCallback((hint?: string) => {
     setProfileHint(hint ?? null);
     setProfileOpen(true);
   }, []);
   const closeProfile = useCallback(() => setProfileOpen(false), []);
-  const requestAnalyze = useCallback(() => setAnalyzeRequested(true), []);
-  const consumeAnalyzeRequest = useCallback(() => setAnalyzeRequested(false), []);
 
-  const highMatchCount = useMemo(
-    () => Object.values(scoreState.scores).filter((s) => s.score >= HIGH_MATCH).length,
-    [scoreState.scores],
+  const recommendedCount = useMemo(
+    () => Object.values(scores).filter((s) => s.score >= RECOMMEND_THRESHOLD).length,
+    [scores],
   );
-  const outdated =
-    scoreState.profileHash !== null && Object.keys(scoreState.scores).length > 0 && scoreState.profileHash !== profileHash(profile);
 
   const value: AiContextValue = {
     profile,
+    profileReady,
     saveProfile,
     apiKey,
     saveApiKey,
@@ -263,22 +331,17 @@ export function AiProvider({ children }: { children: ReactNode }) {
     resetPreferences,
     recordFavorite,
     seedPreferences,
-    scores: scoreState.scores,
-    scoreState,
-    highMatchCount,
-    outdated,
+    scores,
+    info,
+    recommendedCount,
     running,
     warning,
     error,
-    analyze,
-    clearScores,
+    reanalyze,
     profileOpen,
     openProfile,
     closeProfile,
     profileHint,
-    analyzeRequested,
-    requestAnalyze,
-    consumeAnalyzeRequest,
   };
 
   return <AiContext.Provider value={value}>{children}</AiContext.Provider>;
@@ -289,5 +352,3 @@ export function useAi(): AiContextValue {
   if (!ctx) throw new Error("useAi must be used inside AiProvider");
   return ctx;
 }
-
-export { profileIsEmpty };

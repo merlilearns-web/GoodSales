@@ -12,7 +12,7 @@ interface ViewContextValue {
 const ViewContext = createContext<ViewContextValue | null>(null);
 
 export function ViewProvider({ children }: { children: ReactNode }) {
-  const [view, setView] = useState<LeadView>("all");
+  const [view, setView] = useState<LeadView>("ai");
   return <ViewContext.Provider value={{ view, setView }}>{children}</ViewContext.Provider>;
 }
 
