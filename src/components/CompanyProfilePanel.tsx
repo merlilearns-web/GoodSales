@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Brain, Check, Eye, EyeOff, KeyRound, Info, MapPin, RotateCcw, Sparkles, Building2 } from "lucide-react";
+import { Brain, Check, Eraser, Eye, EyeOff, KeyRound, Info, MapPin, RotateCcw, Sparkles, Building2 } from "lucide-react";
 import { useAi } from "@/context/AiContext";
 import { useData } from "@/context/DataContext";
 import { useView } from "@/context/ViewContext";
@@ -89,6 +89,15 @@ export default function CompanyProfilePanel() {
     ai.closeProfile();
   }
 
+  /** Clears every field in the panel and stores the empty profile and key immediately (no analysis is started). */
+  function clearFields() {
+    setDraft(EMPTY_PROFILE);
+    setKeyDraft("");
+    setShowKey(false);
+    ai.saveProfile(EMPTY_PROFILE);
+    ai.saveApiKey("");
+  }
+
   function saveAndShow() {
     save();
     setView("ai");
@@ -105,6 +114,15 @@ export default function CompanyProfilePanel() {
       widthClass="max-w-lg"
       footer={
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            className="btn-ghost text-red-600 hover:bg-red-50 sm:mr-auto"
+            onClick={clearFields}
+            title="Tühjenda kõik profiili väljad ja valikud"
+          >
+            <Eraser className="h-4 w-4" aria-hidden />
+            Tühjenda väljad
+          </button>
           <button type="button" className="btn-secondary" onClick={save}>
             Salvesta
           </button>
